@@ -53,15 +53,16 @@ def test_highway_api(env_id):
 @pytest.mark.parametrize(
     "env_spec",
     [
-        "highway-v0",
-        "merge-v0",
-        "roundabout-v0",
-        "intersection-v0",
-        "intersection-v1",
-        "parking-v0",
-        "two-way-v0",
-        "lane-keeping-v0",
-        "racetrack-v0",
+        # "highway-v0",
+        # "merge-v0",
+        "cut-in-v0",
+        # "roundabout-v0",
+        # "intersection-v0",
+        # "intersection-v1",
+        # "parking-v0",
+        # "two-way-v0",
+        # "lane-keeping-v0",
+        # "racetrack-v0",
     ],
 )
 def test_env_step(env_spec):

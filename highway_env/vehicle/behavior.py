@@ -7,6 +7,7 @@ from highway_env.road.road import LaneIndex, Road, Route
 from highway_env.utils import Vector
 from highway_env.vehicle.controller import ControlledVehicle
 from highway_env.vehicle.kinematics import Vehicle
+from overrides import overrides
 
 
 class IDMVehicle(ControlledVehicle):
@@ -580,3 +581,62 @@ class DefensiveVehicle(LinearVehicle):
         MERGE_ACC_GAIN / (MERGE_VEL_RATIO * MERGE_TARGET_VEL),
         2.0,
     ]
+
+class CutInVehicle(IDMVehicle):
+    def __init__(
+            self,
+            road: Road,
+            position: Vector,
+            heading: float = 0,
+            speed: float = 0,
+            target_lane_index: int = None,
+            target_speed: float = None,
+            route: Route = None,
+            enable_lane_change: bool = True,
+            timer: float = None,
+            data: dict = None,
+    ):
+        super().__init__(
+            road,
+            position,
+            heading,
+            speed,
+            target_lane_index,
+            target_speed,
+            route,
+            enable_lane_change,
+            timer,
+        )
+        self.cut_before_obstacle_distance = 50
+
+    @overrides
+    def change_lane_policy(self) -> None:
+
+        # decide to make a lane change
+        for lane_index in self.road.network.side_lanes(self.lane_index):
+            # Is the candidate lane close enough?
+            if not self.road.network.get_lane(lane_index).is_reachable_from(
+                    self.position
+            ):
+                continue
+            # Only change lane when the vehicle is moving
+            if np.abs(self.speed) < 1:
+                continue
+            # Does the MOBIL model recommend a lane change?
+            if self.check_for_obstacle():
+                self.target_lane_index = lane_index
+
+    def check_for_obstacle(self):
+        current_lane = self.lane_index
+        current_position = self.position
+
+        closest_obstacle = None
+        closest_distance = float('inf')
+
+        for obstacle in self.road.objects:
+            if obstacle.lane_index == current_lane:
+                if abs(obstacle.position[0] - current_position[0]) < self.cut_before_obstacle_distance:
+                    return True
+
+        return False
+
