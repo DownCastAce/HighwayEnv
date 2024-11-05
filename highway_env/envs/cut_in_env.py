@@ -29,11 +29,18 @@ class CutInEnv(AbstractEnv):
                 "reward_speed_range": [20, 30],
                 "merging_speed_reward": -0.5,
                 "lane_change_reward": -1,
+                "target_speed": 30,
+                "ego_target_speed": 30,
+                "starting_speed": 30,
+                "lane_max_speed": 30,
+                "min_cut_in_start": 6,
+                "max_cut_in_start": 21,
                 "other_vehicles_type": "highway_env.vehicle.behavior.CutInVehicle"
             }
         )
         return cfg
 
+    # ToDo : Need to specify the new rewards for this
     def _reward(self, action: int) -> float:
         """
         The vehicle is rewarded for driving with high speed on lanes to the right and avoiding collisions
@@ -99,7 +106,7 @@ class CutInEnv(AbstractEnv):
                 start=np.array([0, 0]),
                 end=np.array([650, 0]),
                 line_types=(LineType.CONTINUOUS_LINE, LineType.STRIPED),
-                speed_limit=30
+                speed_limit=self.config["lane_max_speed"]
             )
         )
 
@@ -109,7 +116,7 @@ class CutInEnv(AbstractEnv):
                 end=np.array([650, StraightLane.DEFAULT_WIDTH]),
                 line_types=(LineType.NONE, LineType.CONTINUOUS_LINE),
                 forbidden=True,
-                speed_limit=30
+                speed_limit=self.config["lane_max_speed"]
         )
 
         # Line to hold potential Cut-In vehicles
@@ -138,18 +145,18 @@ class CutInEnv(AbstractEnv):
         """
         road = self.road
         ego_vehicle = self.action_type.vehicle_class(
-            road, road.network.get_lane(("a", "b", 0)).position(0, 0), speed=25
+            road, road.network.get_lane(("a", "b", 0)).position(0, 0), speed=self.config["starting_speed"]
         )
-        ego_vehicle.target_speed = 30
+        ego_vehicle.target_speed = self.config["ego_target_speed"]
         road.vehicles.append(ego_vehicle)
 
         other_vehicles_type = utils.class_from_path(self.config["other_vehicles_type"])
 
         merging_v = other_vehicles_type(
-            road, road.network.get_lane(("a", "b", 1)).position(50, 0), speed=25
+            road, road.network.get_lane(("a", "b", 1)).position(np.random.randint(self.config["min_cut_in_start"], self.config["max_cut_in_start"]), 0), speed=self.config["starting_speed"]
         )
-        merging_v.target_speed = 30
-        merging_v.cut_before_obstacle_distance = 50
+        merging_v.target_speed = self.config["target_speed"]
+        merging_v.cut_before_obstacle_distance = 20
         road.vehicles.append(merging_v)
         self.vehicle = ego_vehicle
 

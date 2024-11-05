@@ -610,7 +610,41 @@ class CutInVehicle(IDMVehicle):
         self.cut_before_obstacle_distance = 50
 
     @overrides
+    def act(self, action: dict | str = None):
+        """
+        Execute an action.
+
+        For now, no action is supported because the vehicle takes all decisions
+        of acceleration and lane changes on its own, based on the IDM and MOBIL models.
+
+        :param action: the action
+        """
+        if self.crashed:
+            return
+        action = {}
+        # Lateral: MOBIL
+        self.follow_road()
+        if self.enable_lane_change:
+            self.change_lane_policy()
+        action["steering"] = self.steering_control(self.target_lane_index)
+        action["steering"] = np.clip(
+            action["steering"], -self.MAX_STEERING_ANGLE, self.MAX_STEERING_ANGLE
+        )
+
+        # Apply acceleration to ensure top speed of lane (Selfish/Dangerous driver)
+        # Currently doesn't check if another vehicle is directly beside it
+        # Maybe should speed up if so?
+        action["acceleration"] = self.acceleration(
+            ego_vehicle=self, front_vehicle=None, rear_vehicle=None
+        )
+
+        # Skip ControlledVehicle.act(), or the command will be overridden.
+        Vehicle.act(self, action)
+
+    @overrides
     def change_lane_policy(self) -> None:
+
+        # Currently doesn't check if another vehicle is directly beside it
 
         # decide to make a lane change
         for lane_index in self.road.network.side_lanes(self.lane_index):
