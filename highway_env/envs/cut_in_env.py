@@ -30,6 +30,7 @@ class CutInEnv(AbstractEnv):
                 # Rewards
                 "collision_reward": -1, # Don't want to collide with the Cut-In Vehicle
                 "high_speed_reward": 0.2, # Reward is minimal
+                "acceleration_reward": 0.5,
                 "reward_speed_range": [70, 80], #We want to keep pretty high speed
                 "reward_acceleration_range": [-2.5, 1.5],
                 "time_to_collision_reward": 0.2,
@@ -62,6 +63,7 @@ class CutInEnv(AbstractEnv):
         info = {
             "speed": self.vehicle.speed,
             "crashed": self.vehicle.crashed,
+            "ttc": self._time_to_collision(),
             "action": action,
             "acceleration": self.vehicle.action["acceleration"]
 
@@ -81,6 +83,8 @@ class CutInEnv(AbstractEnv):
         :return: the corresponding reward
         """
         rewards = self._rewards(action)
+
+        test = self._time_to_collision()
 
         reward = sum(self.config.get(name, 0) * reward for name, reward in rewards.items())
 
@@ -110,6 +114,26 @@ class CutInEnv(AbstractEnv):
             "collision_reward": float(self.vehicle.crashed),
             "high_speed_reward": np.clip(scaled_speed, 0, 1)
         }
+
+    def _time_to_collision(self) -> float:
+        """Determines the Time to Collision (TTC)"""
+        ego_vehicle = self.vehicle
+        ego_lane = self.vehicle.lane_index
+        vehicle_in_front = next(filter(lambda v: v.lane_index == ego_lane and v != ego_vehicle, self.road.vehicles), None)
+
+        # If there are none then the TTC is infinity
+        if vehicle_in_front is None:
+            return float("inf")
+
+        # Distance between the ego and vehicle in front (If any)
+        distance = vehicle_in_front.position - ego_vehicle.position
+        # Use forward speed rather than speed, see https://github.com/eleurent/highway-env/issues/268
+        ego_v = ego_vehicle.speed * np.cos(ego_vehicle.heading)
+        # Use forward speed rather than speed, see https://github.com/eleurent/highway-env/issues/268
+        vehicle_in_front_v = vehicle_in_front.speed * np.cos(vehicle_in_front.heading)
+
+        # TTC is calculated via Distance and the Relative speed difference between the cars
+        return distance / (ego_v - vehicle_in_front_v)
 
     def _is_terminated(self) -> bool:
         """The episode is over when a collision occurs or when the access ramp has been passed."""
