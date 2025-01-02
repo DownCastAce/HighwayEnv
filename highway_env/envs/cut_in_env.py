@@ -33,19 +33,18 @@ class CutInEnv(AbstractEnv):
                 "acceleration_reward": 0.5,
                 "reward_speed_range": [70, 80], #We want to keep pretty high speed
                 "reward_acceleration_range": [-2.5, 1.5],
-                "time_to_collision_reward": 0.2,
+                "time_to_collision_reward": 0.5,
                 # Ego Vehicle Setup
                 "ego_lane_max_speed": 40, # m/s
                 "ego_target_speed": 40, # m/s
                 "ego_starting_speed": 40, # m/s
                 # Cut In Vehicle Setup
+                "cut_in_buffer": 60, # m
                 "other_vehicles_type": "highway_env.vehicle.behavior.CutInVehicle",
                 "lane_max_speed": 30, # m/s
                 "target_speed": 30, # m/s
                 "starting_speed": [19.44, 25.0], # m/s [70, 90] km/h
                 "min_distance_to_cut_in": 30, # This should likely be a calculated field based on the location and top speed
-                "min_cut_in_start": 30,
-                "max_cut_in_start": 35,
                 # Obstacle Setup
                 "obstacle_start": [200, 1800]
             }
@@ -63,7 +62,9 @@ class CutInEnv(AbstractEnv):
         info = {
             "speed": self.vehicle.speed,
             "crashed": self.vehicle.crashed,
-            "ttc": self._time_to_collision(),
+            # distance to car infront
+            # v_c, 
+            # "ttc": self._time_to_collision(),
             "action": action,
             "acceleration": self.vehicle.action["acceleration"]
 
@@ -84,12 +85,10 @@ class CutInEnv(AbstractEnv):
         """
         rewards = self._rewards(action)
 
-        test = self._time_to_collision()
-
         reward = sum(self.config.get(name, 0) * reward for name, reward in rewards.items())
 
         if self.config["normalize_reward"]:
-            reward = utils.lmap(reward, [self.config["collision_reward"], self.config["high_speed_reward"], self.config["acceleration_reward"]], [0, 1],)
+            reward = utils.lmap(reward, [self.config["collision_reward"] + self.config["acceleration_reward"], self.config["high_speed_reward"]], [0, 1],)
 
         return reward
 
@@ -105,6 +104,16 @@ class CutInEnv(AbstractEnv):
             self.vehicle.action["acceleration"], self.config["reward_acceleration_range"], [0, 1]
         )
 
+        ttc = self._time_to_collision()
+        if ttc == float('inf') or ttc > 2:
+            ttc = 1.0
+        elif ttc < 0:
+            ttc = 0.25  # Less than half for a negative number
+        elif ttc < 2:
+            ttc = 0.0  # Minimum for < 2
+        else:
+            ttc = (ttc - 0) / (2 - 0)  # Linear interpolation between 0 and 2
+
         # Should we use Distance to vehicle infront instead of Crashed (>5?)
         # High speed
         # Maybe deceleration too much is unsafe? Wipelash or better not to crash
@@ -112,6 +121,7 @@ class CutInEnv(AbstractEnv):
         return {
             "acceleration_reward": np.clip(scaled_acceleration, 0, 1),
             "collision_reward": float(self.vehicle.crashed),
+            "time_to_collision_reward": float(ttc),
             "high_speed_reward": np.clip(scaled_speed, 0, 1)
         }
 
@@ -126,9 +136,11 @@ class CutInEnv(AbstractEnv):
             return float("inf")
 
         # Distance between the ego and vehicle in front (If any)
-        distance = vehicle_in_front.position - ego_vehicle.position
+        distance = vehicle_in_front.position[0] - ego_vehicle.position[0]
+
         # Use forward speed rather than speed, see https://github.com/eleurent/highway-env/issues/268
         ego_v = ego_vehicle.speed * np.cos(ego_vehicle.heading)
+
         # Use forward speed rather than speed, see https://github.com/eleurent/highway-env/issues/268
         vehicle_in_front_v = vehicle_in_front.speed * np.cos(vehicle_in_front.heading)
 
@@ -206,8 +218,10 @@ class CutInEnv(AbstractEnv):
         :return: the ego-vehicle
         """
         road = self.road
+
+        ego_velocity = self.config["ego_starting_speed"]
         ego_vehicle = self.action_type.vehicle_class(
-            road, road.network.get_lane(("a", "b", 0)).position(0, 0), speed=self.config["ego_starting_speed"]
+            road, road.network.get_lane(("a", "b", 0)).position(0, 0), speed=ego_velocity
         )
         ego_vehicle.target_speed = self.config["ego_target_speed"]
         road.vehicles.append(ego_vehicle)
@@ -216,12 +230,39 @@ class CutInEnv(AbstractEnv):
         other_vehicles_type = utils.class_from_path(self.config["other_vehicles_type"])
 
         cut_in_start_speed_range = self.config["starting_speed"]
-        cut_in_start_speed = np.random.randint(cut_in_start_speed_range[0], cut_in_start_speed_range[1])
+        cut_in_velocity = np.random.randint(cut_in_start_speed_range[0], cut_in_start_speed_range[1])
+        obstacle_x, _ = road.objects[0].position
 
-        cut_int_v = other_vehicles_type(
-            road, road.network.get_lane(("a", "b", 1)).position(np.random.randint(self.config["min_cut_in_start"], self.config["max_cut_in_start"]), 0), speed=cut_in_start_speed
+        cut_in_accel = self.acceleration(cut_in_velocity, self.config["lane_max_speed"])
+        cut_in_start = self.calc_cut_in_start(ego_velocity, cut_in_velocity, self.config["lane_max_speed"], cut_in_accel, obstacle_x, self.config["cut_in_buffer"] )
+
+        cut_in_v = other_vehicles_type(
+            road, road.network.get_lane(("a", "b", 1)).position(cut_in_start, 0), speed=cut_in_velocity
         )
-        cut_int_v.cut_before_obstacle_distance = self.config["min_distance_to_cut_in"]
-        road.vehicles.append(cut_int_v)
+        cut_in_v.target_speed = self.config["ego_target_speed"]
+        cut_in_v.cut_before_obstacle_distance = self.config["min_distance_to_cut_in"]
+        road.vehicles.append(cut_in_v)
 
+    def acceleration(self, speed, target_speed) -> float:
+        """"""
+        return 3.0 * (1 - np.power(max(speed, 0) / abs(utils.not_zero(target_speed)), self.road.np_random.uniform(low=3.5, high=4.5)))
+
+    def calc_cut_in_start(self, v_e, v_c, m_v_c, a_c, x_o, buffer) -> float:
+        """"""
+        x_eo = x_o - buffer
+        t_x_eo = x_eo / v_e
+
+        # Time to reach max velocity
+        t_r_m_v_c = abs(m_v_c - v_c) / a_c
+
+        # Distance travelled during accelerations
+        # Assuming Constant Acceleration
+        a_x_c = v_c * t_r_m_v_c + (0.5 * a_c * t_r_m_v_c**2)
+
+        # Time at max velocity
+        t_m_v_c = t_x_eo - t_r_m_v_c
+
+        x_c = x_o - (m_v_c * t_m_v_c) - a_x_c
+
+        return x_c
 
