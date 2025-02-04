@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+from typing import TypeVar
 
 from highway_env import utils
 from highway_env.envs.common.abstract import AbstractEnv
@@ -8,6 +9,8 @@ from highway_env.envs.common.action import Action
 from highway_env.road.lane import LineType, SineLane, StraightLane
 from highway_env.road.road import Road, RoadNetwork
 from highway_env.vehicle.objects import Obstacle
+
+Observation = TypeVar("Observation")
 
 class CutInEnv(AbstractEnv):
     """
@@ -51,51 +54,50 @@ class CutInEnv(AbstractEnv):
         )
         return cfg
 
-    def _info(self, obs, action) -> dict:
+    def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
+        return super().step(action)
+
+    def _info(self, obs: Observation, action: Action | None = None) -> dict:
         """
-                Return a dictionary of additional information
+        Return a dictionary of additional information
+        :param obs: current observation
+        :param action: current action
+        :return: info dict
+        """
+        info = super()._info(obs, action)
+        info["ego_vehicle_info"] = self._ego_vehicle_info()
+        info["cut_in_vehicle_info"] = self._cut_in_vehicle_info()
 
-                :param obs: current observation
-                :param action: current action
-                :return: info dict
-                """
-        info = {
-            "speed": self.vehicle.speed,
-            "crashed": self.vehicle.crashed,
-            # distance to car infront
-            # v_c, 
-            # "ttc": self._time_to_collision(),
-            "action": action,
-            "acceleration": self.vehicle.action["acceleration"]
+        info["time_to_collision"] = self._time_to_collision()
+        info["vehicle_positions"] = self._vehicle_positions()
+        # Assume only one obstacle
+        info["obstacle_position"] = self.road.objects[0].position
 
-        }
-        try:
-            info["rewards"] = self._rewards(action)
-        except NotImplementedError:
-            pass
         return info
 
-    # "acceleration"
-    # ToDo : Need to specify the new rewards for this
     def _reward(self, action: Action) -> float:
         """
-        The reward is defined to foster driving at high speed, on the rightmost lanes, and to avoid collisions.
-        :param action: the last action performed
-        :return: the corresponding reward
+        The reward is defined to foster driving at high speed while avoiding collisions.
         """
         rewards = self._rewards(action)
 
         reward = sum(self.config.get(name, 0) * reward for name, reward in rewards.items())
 
         if self.config["normalize_reward"]:
-            reward = utils.lmap(reward, [self.config["collision_reward"] + self.config["acceleration_reward"], self.config["high_speed_reward"]], [0, 1],)
-
+            reward = utils.lmap(reward,
+                                [self.config["collision_reward"],
+                                 self.config["high_speed_reward"] +
+                                 self.config["acceleration_reward"] +
+                                 self.config["time_to_collision_reward"]],
+                                 # + self.config["safe_distance_reward"]],
+                                [0, 1])
         return reward
 
     def _rewards(self, action: Action) -> dict[str, float]:
 
         # Use forward speed rather than speed, see https://github.com/eleurent/highway-env/issues/268
         forward_speed = self.vehicle.speed * np.cos(self.vehicle.heading)
+
         scaled_speed = utils.lmap(
             forward_speed, self.config["reward_speed_range"], [0, 1]
         )
@@ -105,14 +107,25 @@ class CutInEnv(AbstractEnv):
         )
 
         ttc = self._time_to_collision()
-        if ttc == float('inf') or ttc > 2:
-            ttc = 1.0
-        elif ttc < 0:
-            ttc = 0.25  # Less than half for a negative number
-        elif ttc < 2:
-            ttc = 0.0  # Minimum for < 2
+        if ttc == float('inf') or ttc > 3.0:
+            ttc_reward = 1.0
+        elif 2.0 < ttc <= 3.0:
+            ttc_reward = 0.5
+        elif 1.0 < ttc <= 2.0:
+            ttc_reward = 0
+        elif ttc <= 1.0:
+            ttc_reward = -1.0
         else:
-            ttc = (ttc - 0) / (2 - 0)  # Linear interpolation between 0 and 2
+            ttc_reward = -10.0
+
+        # New: Calculate safe distance reward
+        # front_vehicle = self.road.nearest_vehicle_to(self.vehicle, preceding=True)
+        # if front_vehicle:
+        #     distance = self.vehicle.lane_distance_to(front_vehicle)
+        #     safe_distance = self.vehicle.speed * 2  # 2-second rule
+        #     safe_distance_factor = np.clip(distance / safe_distance, 0, 1)
+        # else:
+        #     safe_distance_factor = 1.0
 
         # Should we use Distance to vehicle infront instead of Crashed (>5?)
         # High speed
@@ -121,31 +134,75 @@ class CutInEnv(AbstractEnv):
         return {
             "acceleration_reward": np.clip(scaled_acceleration, 0, 1),
             "collision_reward": float(self.vehicle.crashed),
-            "time_to_collision_reward": float(ttc),
+            "time_to_collision_reward": ttc_reward,
             "high_speed_reward": np.clip(scaled_speed, 0, 1)
+            # ,"safe_distance_reward": safe_distance_factor
         }
 
     def _time_to_collision(self) -> float:
         """Determines the Time to Collision (TTC)"""
         ego_vehicle = self.vehicle
         ego_lane = self.vehicle.lane_index
-        vehicle_in_front = next(filter(lambda v: v.lane_index == ego_lane and v != ego_vehicle, self.road.vehicles), None)
+        vehicle_in_front = next(filter(lambda v: v.lane_index == ego_lane and v != ego_vehicle, self.road.vehicles),
+                                None)
 
         # If there are none then the TTC is infinity
         if vehicle_in_front is None:
             return float("inf")
 
-        # Distance between the ego and vehicle in front (If any)
-        distance = vehicle_in_front.position[0] - ego_vehicle.position[0]
+        # Distance between the ego and vehicle in front, minus the desired safety distance
+        distance = vehicle_in_front.position[0] - ego_vehicle.position[0] - vehicle_in_front.DISTANCE_WANTED
 
         # Use forward speed rather than speed, see https://github.com/eleurent/highway-env/issues/268
         ego_v = ego_vehicle.speed * np.cos(ego_vehicle.heading)
-
-        # Use forward speed rather than speed, see https://github.com/eleurent/highway-env/issues/268
         vehicle_in_front_v = vehicle_in_front.speed * np.cos(vehicle_in_front.heading)
 
         # TTC is calculated via Distance and the Relative speed difference between the cars
-        return distance / (ego_v - vehicle_in_front_v)
+        relative_speed = ego_v - vehicle_in_front_v
+
+        if relative_speed <= 0:
+            return float("inf")
+        else:
+            ttc = distance / relative_speed
+            return max(0, ttc - vehicle_in_front.TIME_WANTED)
+
+    def _ego_vehicle_info(self) -> dict:
+        return {
+            "position": self.vehicle.position,
+            "speed": self.vehicle.speed,
+            "acceleration": self.vehicle.action["acceleration"]
+        }
+
+    def _cut_in_vehicle_info(self) -> dict:
+        # grab cut-in vehicle, assume only one
+        cut_in_vehicle = next(filter(lambda v: v != self.vehicle, self.road.vehicles), None)
+        if cut_in_vehicle is None:
+            return {
+                "position": None,
+                "speed": None,
+                "acceleration": None
+            }
+        return {
+            "position": cut_in_vehicle.position,
+            "speed": cut_in_vehicle.speed,
+            "acceleration": cut_in_vehicle.action["acceleration"]
+        }
+
+    def _vehicle_positions(self) -> dict[str, float]:
+        """Determines the Time to Collision (TTC)"""
+        ego_vehicle = self.vehicle
+        ego_lane = self.vehicle.lane_index
+        vehicle_in_front = next(filter(lambda v: v.lane_index == ego_lane and v != ego_vehicle, self.road.vehicles),
+                                None)
+
+        # If there are none then the TTC is infinity
+        if vehicle_in_front is None:
+            return { "ego_vehicle_position": ego_vehicle.position[0], "vehicle_in_front_position": None, "distance": float("inf") }
+
+        # Distance between the ego and vehicle in front (If any)
+        distance = vehicle_in_front.position[0] - ego_vehicle.position[0]
+
+        return { "ego_vehicle_position": ego_vehicle.position[0], "vehicle_in_front_position": vehicle_in_front.position[0], "distance": distance }
 
     def _is_terminated(self) -> bool:
         """The episode is over when a collision occurs or when the access ramp has been passed."""
@@ -248,21 +305,34 @@ class CutInEnv(AbstractEnv):
         return 3.0 * (1 - np.power(max(speed, 0) / abs(utils.not_zero(target_speed)), self.road.np_random.uniform(low=3.5, high=4.5)))
 
     def calc_cut_in_start(self, v_e, v_c, m_v_c, a_c, x_o, buffer) -> float:
-        """"""
+        """
+        Calculate the starting position for the cut-in vehicle.
+
+        :param v_e: Ego vehicle speed (m/s)
+        :param v_c: Cut-in vehicle initial speed (m/s)
+        :param m_v_c: Cut-in vehicle max speed (m/s)
+        :param a_c: Cut-in vehicle acceleration (m/s^2)
+        :param x_o: Obstacle position (m)
+        :param buffer: Desired buffer distance between ego and cut-in vehicle at cut-in point (m)
+        :return: Starting position for the cut-in vehicle (m)
+        """
         x_eo = x_o - buffer
         t_x_eo = x_eo / v_e
 
         # Time to reach max velocity
-        t_r_m_v_c = abs(m_v_c - v_c) / a_c
+        t_r_m_v_c = (m_v_c - v_c) / a_c
 
-        # Distance travelled during accelerations
-        # Assuming Constant Acceleration
+        # Distance travelled during acceleration
         a_x_c = v_c * t_r_m_v_c + (0.5 * a_c * t_r_m_v_c**2)
 
         # Time at max velocity
-        t_m_v_c = t_x_eo - t_r_m_v_c
+        t_m_v_c = max(0, t_x_eo - t_r_m_v_c)
 
-        x_c = x_o - (m_v_c * t_m_v_c) - a_x_c
+        # Total distance traveled by cut-in vehicle
+        x_c_total = a_x_c + (m_v_c * t_m_v_c)
 
-        return x_c
+        # Starting position for cut-in vehicle
+        x_c = x_o - x_c_total
+
+        return max(0, x_c)  # Ensure non-negative starting position
 
