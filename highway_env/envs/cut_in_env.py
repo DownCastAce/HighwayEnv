@@ -27,11 +27,11 @@ class CutInEnv(AbstractEnv):
         cfg.update(
             {
                 # Config
-                "duration": 60,  # [s]
+                "duration": 70,  # [s] is that max it would take going at 30 m/s to reach 2000m
                 "normalize_reward": True,
                 "lane_length": 2000,
                 # Rewards
-                "collision_reward": -1, # Don't want to collide with the Cut-In Vehicle
+                "collision_reward": -2, # Don't want to collide with the Cut-In Vehicle
                 "high_speed_reward": 0.2, # Reward is minimal
                 "acceleration_reward": 0.5,
                 "reward_speed_range": [70, 80], #We want to keep pretty high speed
@@ -54,9 +54,6 @@ class CutInEnv(AbstractEnv):
         )
         return cfg
 
-    def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
-        return super().step(action)
-
     def _info(self, obs: Observation, action: Action | None = None) -> dict:
         """
         Return a dictionary of additional information
@@ -67,11 +64,10 @@ class CutInEnv(AbstractEnv):
         info = super()._info(obs, action)
         info["ego_vehicle_info"] = self._ego_vehicle_info()
         info["cut_in_vehicle_info"] = self._cut_in_vehicle_info()
-
         info["time_to_collision"] = self._time_to_collision()
-        info["vehicle_positions"] = self._vehicle_positions()
+
         # Assume only one obstacle
-        info["obstacle_position"] = self.road.objects[0].position
+        info["obstacle_position"] = float(self.road.objects[0].position[0])
 
         return info
 
@@ -107,8 +103,10 @@ class CutInEnv(AbstractEnv):
         )
 
         ttc = self._time_to_collision()
-        if ttc == float('inf') or ttc > 3.0:
+        if ttc == float('inf') or ttc > 5.0:
             ttc_reward = 1.0
+        elif ttc > 3.0:
+            ttc_reward = 5.0
         elif 2.0 < ttc <= 3.0:
             ttc_reward = 0.5
         elif 1.0 < ttc <= 2.0:
@@ -132,10 +130,10 @@ class CutInEnv(AbstractEnv):
         # Maybe deceleration too much is unsafe? Wipelash or better not to crash
         # Or have crashed but certain velocity is determines the reward? Safe/Unsafe/Likely Death?
         return {
-            "acceleration_reward": np.clip(scaled_acceleration, 0, 1),
+            "acceleration_reward": float(np.clip(scaled_acceleration, 0, 1)),
             "collision_reward": float(self.vehicle.crashed),
             "time_to_collision_reward": ttc_reward,
-            "high_speed_reward": np.clip(scaled_speed, 0, 1)
+            "high_speed_reward": float(np.clip(scaled_speed, 0, 1))
             # ,"safe_distance_reward": safe_distance_factor
         }
 
@@ -164,11 +162,12 @@ class CutInEnv(AbstractEnv):
             return float("inf")
         else:
             ttc = distance / relative_speed
-            return max(0, ttc - vehicle_in_front.TIME_WANTED)
+            return float(max(0, ttc - vehicle_in_front.TIME_WANTED))
 
     def _ego_vehicle_info(self) -> dict:
         return {
-            "position": self.vehicle.position,
+            "position": float(self.vehicle.position[0]),
+            "lane": self.vehicle.lane_index[2],
             "speed": self.vehicle.speed,
             "acceleration": self.vehicle.action["acceleration"]
         }
@@ -183,7 +182,8 @@ class CutInEnv(AbstractEnv):
                 "acceleration": None
             }
         return {
-            "position": cut_in_vehicle.position,
+            "position": float(cut_in_vehicle.position[0]),
+            "lane": cut_in_vehicle.lane_index[2],
             "speed": cut_in_vehicle.speed,
             "acceleration": cut_in_vehicle.action["acceleration"]
         }
