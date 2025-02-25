@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import math
 from typing import TypeVar
 
 from highway_env import utils
@@ -31,12 +32,12 @@ class CutInEnv(AbstractEnv):
                 "normalize_reward": True,
                 "lane_length": 2000,
                 # Rewards
-                "collision_reward": -2, # Don't want to collide with the Cut-In Vehicle
-                "high_speed_reward": 0.2, # Reward is minimal
-                "acceleration_reward": 0.5,
+                "collision_reward": -1, # Don't want to collide with the Cut-In Vehicle
+                "high_speed_reward": 0.3, # Reward is minimal
+                "acceleration_reward": 0.1,
                 "reward_speed_range": [70, 80], #We want to keep pretty high speed
                 "reward_acceleration_range": [-2.5, 1.5],
-                "time_to_collision_reward": 0.5,
+                "time_to_collision_reward": 0.7,
                 # Ego Vehicle Setup
                 "ego_lane_max_speed": 40, # m/s
                 "ego_target_speed": 40, # m/s
@@ -89,52 +90,70 @@ class CutInEnv(AbstractEnv):
                                 [0, 1])
         return reward
 
-    def _rewards(self, action: Action) -> dict[str, float]:
+    def ttc_reward_function(self, ttc):
+        """
+        Calculate Time to Collision reward based on the Time to Collision
 
-        # Use forward speed rather than speed, see https://github.com/eleurent/highway-env/issues/268
+        ttc: Time before a collision will occur
+        """
+        if ttc == float('inf'):
+            return 1.0  # Maximum reward for no collision risk
+        elif ttc <= 0:
+            return 0.0  # Minimum reward for imminent collision
+        else:
+            # Exponential decay function
+            return 1 - math.exp(-ttc / 3)
+
+    def speed_reward_function(self, speed, min_speed=22.22, target_min=26.39, target_max=29.17, max_speed=33.33):
+        """
+        Calculate speed reward based on the current speed in m/s.
+
+        min_speed: 80 km/h in m/s
+        target_min: 95 km/h in m/s
+        target_max: 105 km/h in m/s
+        max_speed: 120 km/h in m/s
+        """
+        if speed < min_speed:
+            return 0
+        elif min_speed <= speed < target_min:
+            return np.interp(speed, [min_speed, target_min], [0, 0.8])
+        elif target_min <= speed <= target_max:
+            return 1
+        elif target_max < speed <= max_speed:
+            return np.interp(speed, [target_max, max_speed], [1, -0.5])
+        else:
+            return -1
+
+    def _rewards(self, action: Action) -> dict[str, float]:
+        # Calculate forward speed
         forward_speed = self.vehicle.speed * np.cos(self.vehicle.heading)
 
-        scaled_speed = utils.lmap(
-            forward_speed, self.config["reward_speed_range"], [0, 1]
-        )
-
+        # Calculate acceleration reward
         scaled_acceleration = utils.lmap(
-            self.vehicle.action["acceleration"], self.config["reward_acceleration_range"], [0, 1]
+            self.vehicle.action["acceleration"],
+            self.config["reward_acceleration_range"],
+            [0, 1]
         )
 
+        acceleration_reward = float(np.clip(scaled_acceleration, 0, 1))
+
+        # Calculate collision reward
+        collision_reward = float(self.vehicle.crashed)
+
+        # Calculate TTC reward
         ttc = self._time_to_collision()
-        if ttc == float('inf') or ttc > 5.0:
-            ttc_reward = 1.0
-        elif ttc > 3.0:
-            ttc_reward = 5.0
-        elif 2.0 < ttc <= 3.0:
-            ttc_reward = 0.5
-        elif 1.0 < ttc <= 2.0:
-            ttc_reward = 0
-        elif ttc <= 1.0:
-            ttc_reward = -1.0
-        else:
-            ttc_reward = -10.0
+        ttc_reward = self.ttc_reward_function(ttc)
 
-        # New: Calculate safe distance reward
-        # front_vehicle = self.road.nearest_vehicle_to(self.vehicle, preceding=True)
-        # if front_vehicle:
-        #     distance = self.vehicle.lane_distance_to(front_vehicle)
-        #     safe_distance = self.vehicle.speed * 2  # 2-second rule
-        #     safe_distance_factor = np.clip(distance / safe_distance, 0, 1)
-        # else:
-        #     safe_distance_factor = 1.0
+        # Calculate speed reward
+        max_speed = self.config["ego_lane_max_speed"]
+        target_speed = self.config["ego_target_speed"]
+        speed_reward = self.speed_reward_function(forward_speed, target_max=target_speed, max_speed=max_speed)
 
-        # Should we use Distance to vehicle infront instead of Crashed (>5?)
-        # High speed
-        # Maybe deceleration too much is unsafe? Wipelash or better not to crash
-        # Or have crashed but certain velocity is determines the reward? Safe/Unsafe/Likely Death?
         return {
-            "acceleration_reward": float(np.clip(scaled_acceleration, 0, 1)),
-            "collision_reward": float(self.vehicle.crashed),
+            "acceleration_reward": acceleration_reward,
+            "collision_reward": collision_reward,
             "time_to_collision_reward": ttc_reward,
-            "high_speed_reward": float(np.clip(scaled_speed, 0, 1))
-            # ,"safe_distance_reward": safe_distance_factor
+            "high_speed_reward": speed_reward
         }
 
     def _time_to_collision(self) -> float:
