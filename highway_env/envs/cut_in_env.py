@@ -113,10 +113,12 @@ class CutInEnv(AbstractEnv):
         target_max: 105 km/h in m/s
         max_speed: 120 km/h in m/s
         """
+        min_reward = 0.1 if target_max == max_speed else 0
+
         if speed < min_speed:
             return 0
         elif min_speed <= speed < target_min:
-            return np.interp(speed, [min_speed, target_min], [0, 0.8])
+            return np.interp(speed, [min_speed, target_min], [min_reward, 0.7])
         elif target_min <= speed <= target_max:
             return 1
         elif target_max < speed <= max_speed:
@@ -147,7 +149,7 @@ class CutInEnv(AbstractEnv):
         # Calculate speed reward
         max_speed = self.config["ego_lane_max_speed"]
         target_speed = self.config["ego_target_speed"]
-        speed_reward = self.speed_reward_function(forward_speed, target_max=target_speed, max_speed=max_speed)
+        speed_reward = self.speed_reward_function(forward_speed) #, target_max=target_speed, max_speed=max_speed)
 
         return {
             "acceleration_reward": acceleration_reward,
@@ -315,7 +317,7 @@ class CutInEnv(AbstractEnv):
         cut_in_v = other_vehicles_type(
             road, road.network.get_lane(("a", "b", 1)).position(cut_in_start, 0), speed=cut_in_velocity
         )
-        cut_in_v.target_speed = self.config["ego_target_speed"]
+        cut_in_v.target_speed = self.config["target_speed"]
         cut_in_v.cut_before_obstacle_distance = self.config["min_distance_to_cut_in"]
         road.vehicles.append(cut_in_v)
 
