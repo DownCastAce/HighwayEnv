@@ -32,12 +32,12 @@ class CutInEnv(AbstractEnv):
                 "normalize_reward": True,
                 "lane_length": 2000,
                 # Rewards
-                "collision_reward": -1, # Don't want to collide with the Cut-In Vehicle
-                "high_speed_reward": 0.3, # Reward is minimal
+                "collision_reward": -3, # Don't want to collide with the Cut-In Vehicle
+                "high_speed_reward": 0.7, # Reward is minimal
                 "acceleration_reward": 0.1,
-                "reward_speed_range": [70, 80], #We want to keep pretty high speed
-                "reward_acceleration_range": [-2.5, 1.5],
                 "time_to_collision_reward": 0.7,
+                "reward_speed_range": [70, 80], #We want to keep pretty high speed
+                "reward_acceleration_range": [-2.5, 2.5],
                 # Ego Vehicle Setup
                 "ego_lane_max_speed": 40, # m/s
                 "ego_target_speed": 40, # m/s
@@ -78,16 +78,20 @@ class CutInEnv(AbstractEnv):
         """
         rewards = self._rewards(action)
 
-        reward = sum(self.config.get(name, 0) * reward for name, reward in rewards.items())
+        raw_reward = sum(self.config.get(name, 0) * reward for name, reward in rewards.items())
 
         if self.config["normalize_reward"]:
-            reward = utils.lmap(reward,
-                                [self.config["collision_reward"],
-                                 self.config["high_speed_reward"] +
-                                 self.config["acceleration_reward"] +
-                                 self.config["time_to_collision_reward"]],
-                                 # + self.config["safe_distance_reward"]],
-                                [0, 1])
+            low = self.config["collision_reward"] * 1.1
+            high = (
+                    self.config["high_speed_reward"]
+                    + self.config["acceleration_reward"]
+                    + self.config["time_to_collision_reward"]
+                    + self.config.get("max_speed_bonus", 0)
+            )
+            reward = utils.lmap(raw_reward, [low, high], [0, 1])
+        else:
+            reward = raw_reward
+
         return reward
 
     def ttc_reward_function(self, ttc):
@@ -116,7 +120,7 @@ class CutInEnv(AbstractEnv):
         min_reward = 0.1 if target_max == max_speed else 0
 
         if speed < min_speed:
-            return 0
+            return -1
         elif min_speed <= speed < target_min:
             return np.interp(speed, [min_speed, target_min], [min_reward, 0.7])
         elif target_min <= speed <= target_max:
@@ -146,10 +150,9 @@ class CutInEnv(AbstractEnv):
         ttc = self._time_to_collision()
         ttc_reward = self.ttc_reward_function(ttc)
 
-        # Calculate speed reward
         max_speed = self.config["ego_lane_max_speed"]
         target_speed = self.config["ego_target_speed"]
-        speed_reward = self.speed_reward_function(forward_speed) #, target_max=target_speed, max_speed=max_speed)
+        speed_reward = self.speed_reward_function(forward_speed, target_max=target_speed, max_speed=max_speed)
 
         return {
             "acceleration_reward": acceleration_reward,
@@ -268,11 +271,7 @@ class CutInEnv(AbstractEnv):
         )
 
         # Line to hold potential Cut-In vehicles
-        net.add_lane(
-            "a",
-            "b",
-            cut_in_lane
-        )
+        net.add_lane("a","b", cut_in_lane)
         
         road = Road(
             network=net,
@@ -281,11 +280,12 @@ class CutInEnv(AbstractEnv):
         )
 
         # Range
-        obstacle_location_range = self.config["obstacle_start"]
-        obstacle_start = np.random.randint(obstacle_location_range[0], obstacle_location_range[1])
+        low, high = self.config["obstacle_start"]
+        obstacle_x = np.random.randint(low, high)
+        obstacle_point = cut_in_lane.position(obstacle_x, 0)
 
         # Force a Cut-In Scenario
-        road.objects.append(Obstacle(road, cut_in_lane.position(obstacle_start, 0)))
+        road.objects.append(Obstacle(road, obstacle_point))
 
         self.road = road
 
