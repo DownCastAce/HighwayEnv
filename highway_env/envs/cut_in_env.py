@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import numpy as np
 import math
-from typing import TypeVar
+from typing import TypeVar, Optional
 
 from highway_env import utils
 from highway_env.envs.common.abstract import AbstractEnv
 from highway_env.envs.common.action import Action
 from highway_env.road.lane import LineType, SineLane, StraightLane
 from highway_env.road.road import Road, RoadNetwork
+from highway_env.vehicle.kinematics import Vehicle
 from highway_env.vehicle.objects import Obstacle
 
 Observation = TypeVar("Observation")
@@ -74,11 +75,13 @@ class CutInEnv(AbstractEnv):
 
     def _reward(self, action: Action) -> float:
         """
-        The reward is defined to foster driving at high speed while avoiding collisions.
+        Composite reward: maintain max speed unless a car is ahead, then adapt reward
+        to emphasize safety/distance and speed matching.
         """
         rewards = self._rewards(action)
-
-        raw_reward = sum(self.config.get(name, 0) * reward for name, reward in rewards.items())
+        raw_reward = sum(
+            self.config.get(name, 0) * reward for name, reward in rewards.items()
+        )
 
         if self.config["normalize_reward"]:
             low = self.config["collision_reward"] * 1.1
@@ -94,6 +97,56 @@ class CutInEnv(AbstractEnv):
 
         return reward
 
+    def _rewards(self, action: Action) -> dict[str, float]:
+        """Compute reward components based on the traffic context w/2-flows approach."""
+        # Compute TTC
+        ttc, front_vehicle, distance = self._front_vehicle_info()
+
+        # --- 1. No car ahead: maximize speed
+        if ttc == float('inf'):
+            speed_reward = self.speed_reward_function(self.vehicle.speed)
+            safety_reward = 1.0
+            match_speed_reward = 0.0  # Not relevant
+
+        # --- 2. Car ahead: modulate rewards
+        else:
+            # How close are we? Use a reasonable threshold, e.g. safe_follow_distance
+            safe_distance = max(self.vehicle.speed * 2.0, 10.0)  # eg. 2s rule
+            # If close: reward safe following and matching front car's speed
+            if distance < safe_distance * 1.2:
+                # Reward matching speed with car ahead (velocity difference small)
+                relative_speed = self.vehicle.speed - front_vehicle.speed
+                match_speed_reward = math.exp(-abs(relative_speed) / 2.0)
+                # Safety reward based on distance
+                # (penalize being too close)
+                distance_reward = math.exp(-abs(distance - safe_distance) / 5.0)
+                safety_reward = 0.5 * self.ttc_reward_function(ttc) + 0.5 * distance_reward
+                # Encourage staying just under or at the front vehicle's speed
+                speed_reward = 0.3 * self.speed_reward_function(self.vehicle.speed) + \
+                               0.7 * match_speed_reward
+            else:
+                # Not close yet, treat much like "no car ahead" but with ttc awareness
+                speed_reward = self.speed_reward_function(self.vehicle.speed)
+                safety_reward = self.ttc_reward_function(ttc)
+                match_speed_reward = 0.0
+
+        forward_speed = self.vehicle.speed * np.cos(self.vehicle.heading)
+        scaled_acceleration = utils.lmap(
+            self.vehicle.action["acceleration"],
+            self.config["reward_acceleration_range"],
+            [0, 1]
+        )
+        acceleration_reward = float(np.clip(scaled_acceleration, 0, 1))
+        collision_reward = float(self.vehicle.crashed)
+
+        return {
+            "high_speed_reward": speed_reward,
+            "acceleration_reward": acceleration_reward,
+            "time_to_collision_reward": safety_reward,
+            "match_speed_reward": match_speed_reward,
+            "collision_reward": collision_reward
+        }
+
     def ttc_reward_function(self, ttc):
         """
         Calculate Time to Collision reward based on the Time to Collision
@@ -108,21 +161,14 @@ class CutInEnv(AbstractEnv):
             # Exponential decay function
             return 1 - math.exp(-ttc / 3)
 
-    def speed_reward_function(self, speed, min_speed=22.22, target_min=26.39, target_max=29.17, max_speed=33.33):
-        """
-        Calculate speed reward based on the current speed in m/s.
-
-        min_speed: 80 km/h in m/s
-        target_min: 95 km/h in m/s
-        target_max: 105 km/h in m/s
-        max_speed: 120 km/h in m/s
-        """
-        min_reward = 0.1 if target_max == max_speed else 0
-
+    def speed_reward_function(self, speed, min_speed=22.22, target_min=26.39,
+                              target_max=29.17, max_speed=33.33):
+        if speed < 0:
+            return -2  # Stronger penalty for reversing!
         if speed < min_speed:
             return -1
         elif min_speed <= speed < target_min:
-            return np.interp(speed, [min_speed, target_min], [min_reward, 0.7])
+            return np.interp(speed, [min_speed, target_min], [0.1, 0.7])
         elif target_min <= speed <= target_max:
             return 1
         elif target_max < speed <= max_speed:
@@ -130,63 +176,35 @@ class CutInEnv(AbstractEnv):
         else:
             return -1
 
-    def _rewards(self, action: Action) -> dict[str, float]:
-        # Calculate forward speed
-        forward_speed = self.vehicle.speed * np.cos(self.vehicle.heading)
-
-        # Calculate acceleration reward
-        scaled_acceleration = utils.lmap(
-            self.vehicle.action["acceleration"],
-            self.config["reward_acceleration_range"],
-            [0, 1]
-        )
-
-        acceleration_reward = float(np.clip(scaled_acceleration, 0, 1))
-
-        # Calculate collision reward
-        collision_reward = float(self.vehicle.crashed)
-
-        # Calculate TTC reward
-        ttc = self._time_to_collision()
-        ttc_reward = self.ttc_reward_function(ttc)
-
-        max_speed = self.config["ego_lane_max_speed"]
-        target_speed = self.config["ego_target_speed"]
-        speed_reward = self.speed_reward_function(forward_speed, target_max=target_speed, max_speed=max_speed)
-
-        return {
-            "acceleration_reward": acceleration_reward,
-            "collision_reward": collision_reward,
-            "time_to_collision_reward": ttc_reward,
-            "high_speed_reward": speed_reward
-        }
-
     def _time_to_collision(self) -> float:
-        """Determines the Time to Collision (TTC)"""
+        """Return the time-to-collision to the front vehicle in current lane, or inf if none."""
+        ttc, _, _ = self._front_vehicle_info()
+        return ttc
+
+    def _front_vehicle_info(self) -> tuple[float, Optional[Vehicle], float]:
+        """Return (ttc, front_vehicle, distance) for the closest vehicle ahead."""
         ego_vehicle = self.vehicle
         ego_lane = self.vehicle.lane_index
-        vehicle_in_front = next(filter(lambda v: v.lane_index == ego_lane and v != ego_vehicle, self.road.vehicles),
-                                None)
-
-        # If there are none then the TTC is infinity
-        if vehicle_in_front is None:
-            return float("inf")
-
-        # Distance between the ego and vehicle in front, minus the desired safety distance
-        distance = vehicle_in_front.position[0] - ego_vehicle.position[0] - vehicle_in_front.DISTANCE_WANTED
-
-        # Use forward speed rather than speed, see https://github.com/eleurent/highway-env/issues/268
+        vehicles_ahead = [
+            (v, v.position[0] - ego_vehicle.position[0])
+            for v in self.road.vehicles
+            if v.lane_index == ego_lane and v != ego_vehicle and v.position[0] > ego_vehicle.position[0]
+        ]
+        if not vehicles_ahead:
+            return float('inf'), None, float('inf')
+        front_vehicle, distance = min(vehicles_ahead, key=lambda x: x[1])
+        distance -= getattr(front_vehicle, 'DISTANCE_WANTED', 0.0)
         ego_v = ego_vehicle.speed * np.cos(ego_vehicle.heading)
-        vehicle_in_front_v = vehicle_in_front.speed * np.cos(vehicle_in_front.heading)
-
-        # TTC is calculated via Distance and the Relative speed difference between the cars
-        relative_speed = ego_v - vehicle_in_front_v
+        front_v = front_vehicle.speed * np.cos(front_vehicle.heading)
+        relative_speed = ego_v - front_v
 
         if relative_speed <= 0:
-            return float("inf")
+            ttc = float('inf')
         else:
             ttc = distance / relative_speed
-            return float(max(0, ttc - vehicle_in_front.TIME_WANTED))
+        ttc -= getattr(front_vehicle, 'TIME_WANTED', 1.5)
+        ttc = max(0, ttc)
+        return ttc, front_vehicle, distance
 
     def _ego_vehicle_info(self) -> dict:
         return {
