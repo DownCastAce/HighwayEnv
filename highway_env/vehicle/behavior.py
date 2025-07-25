@@ -664,9 +664,6 @@ class CutInVehicle(IDMVehicle):
         current_lane = self.lane_index
         current_position = self.position
 
-        closest_obstacle = None
-        closest_distance = float('inf')
-
         for obstacle in self.road.objects:
             if obstacle.lane_index == current_lane:
                 if abs(obstacle.position[0] - current_position[0]) < self.cut_before_obstacle_distance:

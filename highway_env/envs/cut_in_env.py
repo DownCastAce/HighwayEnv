@@ -130,7 +130,6 @@ class CutInEnv(AbstractEnv):
                 safety_reward = self.ttc_reward_function(ttc)
                 match_speed_reward = 0.0
 
-        forward_speed = self.vehicle.speed * np.cos(self.vehicle.heading)
         scaled_acceleration = utils.lmap(
             self.vehicle.action["acceleration"],
             self.config["reward_acceleration_range"],
@@ -343,35 +342,46 @@ class CutInEnv(AbstractEnv):
         """"""
         return 3.0 * (1 - np.power(max(speed, 0) / abs(utils.not_zero(target_speed)), self.road.np_random.uniform(low=3.5, high=4.5)))
 
-    def calc_cut_in_start(self, v_e, v_c, m_v_c, a_c, x_o, buffer) -> float:
+    def calc_cut_in_start(self,
+                          ego_speed: float,
+                          cutin_speed_init: float,
+                          cutin_speed_max: float,
+                          cutin_accel: float,
+                          obstacle_pos: float,
+                          merge_buffer: float
+                          ) -> float:
         """
         Calculate the starting position for the cut-in vehicle.
 
-        :param v_e: Ego vehicle speed (m/s)
-        :param v_c: Cut-in vehicle initial speed (m/s)
-        :param m_v_c: Cut-in vehicle max speed (m/s)
-        :param a_c: Cut-in vehicle acceleration (m/s^2)
-        :param x_o: Obstacle position (m)
-        :param buffer: Desired buffer distance between ego and cut-in vehicle at cut-in point (m)
+        :param ego_speed: Ego vehicle speed (m/s)
+        :param cutin_speed_init: Cut-in vehicle initial speed (m/s)
+        :param cutin_speed_max: Cut-in vehicle maximum speed (m/s)
+        :param cutin_accel: Cut-in vehicle acceleration (m/s^2)
+        :param obstacle_pos: Obstacle position along the lane (m)
+        :param merge_buffer: Desired buffer distance at the cut-in point (m)
         :return: Starting position for the cut-in vehicle (m)
         """
-        x_eo = x_o - buffer
-        t_x_eo = x_eo / v_e
+        # Distance from ego to obstacle minus the safety buffer
+        x_ego_to_obstacle = obstacle_pos - merge_buffer
 
-        # Time to reach max velocity
-        t_r_m_v_c = (m_v_c - v_c) / a_c
+        # Time until ego reaches the buffer point
+        t_until_buffer = x_ego_to_obstacle / ego_speed
 
-        # Distance travelled during acceleration
-        a_x_c = v_c * t_r_m_v_c + (0.5 * a_c * t_r_m_v_c**2)
+        # Time for the cut-in vehicle to accelerate from initial-to-max speed
+        t_accel = (cutin_speed_max - cutin_speed_init) / cutin_accel
 
-        # Time at max velocity
-        t_m_v_c = max(0, t_x_eo - t_r_m_v_c)
+        # Time spent at max speed before reaching the buffer point
+        t_at_max = max(0.0, t_until_buffer - t_accel)
 
-        # Total distance traveled by cut-in vehicle
-        x_c_total = a_x_c + (m_v_c * t_m_v_c)
+        # Distance covered during acceleration
+        d_accel = (cutin_speed_init * t_accel + 0.5 * cutin_accel * t_accel ** 2)
 
-        # Starting position for cut-in vehicle
-        x_c = x_o - x_c_total
+        # Total distance the cut-in vehicle travels before merge
+        d_total = d_accel + cutin_speed_max * t_at_max
 
-        return max(0, x_c)  # Ensure non-negative starting position
+        # Compute the starting position so that it arrives at the buffer point just in time
+        start_pos = obstacle_pos - d_total
+
+        # Ensure non-negative start position
+        return max(0.0, start_pos)
 
