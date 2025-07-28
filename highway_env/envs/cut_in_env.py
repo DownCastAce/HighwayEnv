@@ -28,6 +28,7 @@ class CutInEnv(AbstractEnv):
         cfg = super().default_config()
         cfg.update(
             {
+                "reward_version": 3,
                 # Config
                 "duration": 70,  # [s] is that max it would take going at 30 m/s to reach 2000m
                 "normalize_reward": True,
@@ -74,11 +75,55 @@ class CutInEnv(AbstractEnv):
         return info
 
     def _reward(self, action: Action) -> float:
+        reward_version = self.config["reward_version"]
+
+        if reward_version == 1:
+            return self._reward_version_1(action)
+        elif reward_version == 2:
+            return self._reward_version_2(action)
+        elif reward_version == 3:
+            return self._reward_version_3(action)
+        else:
+            raise ValueError(f"Unknown reward version: {reward_version}")
+
+    def _reward_version_1(self, action: Action) -> float:
         """
-        Composite reward: maintain max speed unless a car is ahead, then adapt reward
-        to emphasize safety/distance and speed matching.
+            The reward is defined to foster driving at high speed, on the rightmost lanes, and to avoid collisions.
+            :param action: the last action performed
+            :return: the corresponding reward
         """
-        rewards = self._rewards(action)
+        rewards = self._rewards_version_1(action)
+
+        reward = sum(self.config.get(name, 0) * reward for name, reward in rewards.items())
+
+        if self.config["normalize_reward"]:
+            reward = utils.lmap(reward, [self.config["collision_reward"], self.config["high_speed_reward"]], [0, 1], )
+
+        return reward
+
+    def _reward_version_2(self, action: Action) -> float:
+        """
+                The reward is defined to foster driving at high speed while avoiding collisions.
+                """
+        rewards = self._rewards_version_2(action)
+
+        reward = sum(self.config.get(name, 0) * reward for name, reward in rewards.items())
+
+        if self.config["normalize_reward"]:
+            reward = utils.lmap(reward,
+                                [self.config["collision_reward"],
+                                 self.config["high_speed_reward"] +
+                                 self.config["acceleration_reward"] +
+                                 self.config["time_to_collision_reward"]],
+                                [0, 1])
+        return reward
+
+    def _reward_version_3(self, action: Action) -> float:
+        """
+                Composite reward: maintain max speed unless a car is ahead, then adapt reward
+                to emphasize safety/distance and speed matching.
+                """
+        rewards = self._rewards_version_3(action)
         raw_reward = sum(
             self.config.get(name, 0) * reward for name, reward in rewards.items()
         )
@@ -97,7 +142,68 @@ class CutInEnv(AbstractEnv):
 
         return reward
 
+
     def _rewards(self, action: Action) -> dict[str, float]:
+        reward_version = self.config["reward_version"]
+
+        if reward_version == 1:
+            return self._rewards_version_1(action)
+        elif reward_version == 2:
+            return self._rewards_version_2(action)
+        elif reward_version == 3:
+            return self._rewards_version_3(action)
+        else:
+            raise ValueError(f"Unknown reward version: {reward_version}")
+
+    def _rewards_version_1(self, action: Action) -> dict[str, float]:
+        # Use forward speed rather than speed, see https://github.com/eleurent/highway-env/issues/268
+        forward_speed = self.vehicle.speed * np.cos(self.vehicle.heading)
+        scaled_speed = utils.lmap(
+            forward_speed, self.config["reward_speed_range"], [0, 1]
+        )
+
+        # Should we use Distance to vehicle infront instead of Crashed (>5?)
+        # High speed
+        # Maybe deceleration too much is unsafe? Wipelash or better not to crash
+        # Or have crashed but certain velocity is determines the reward? Safe/Unsafe/Likely Death?
+        return {
+            "collision_reward": float(self.vehicle.crashed),
+            "high_speed_reward": np.clip(scaled_speed, 0, 1)
+        }
+
+    def _rewards_version_2(self, action: Action) -> dict[str, float]:
+        # Calculate forward speed
+        forward_speed = self.vehicle.speed * np.cos(self.vehicle.heading)
+
+        # Calculate acceleration reward
+        scaled_acceleration = utils.lmap(
+            self.vehicle.action["acceleration"],
+            self.config["reward_acceleration_range"],
+            [0, 1]
+        )
+
+        acceleration_reward = float(np.clip(scaled_acceleration, 0, 1))
+
+        # Calculate collision reward
+        collision_reward = float(self.vehicle.crashed)
+
+        # Calculate TTC reward
+        ttc = self._time_to_collision()
+        ttc_reward = self.ttc_reward_function(ttc)
+
+        # Calculate speed reward
+        max_speed = self.config["ego_lane_max_speed"]
+        target_speed = self.config["ego_target_speed"]
+        speed_reward = self.speed_reward_function(forward_speed, target_max=target_speed, max_speed=max_speed)
+
+        return {
+            "acceleration_reward": acceleration_reward,
+            "collision_reward": collision_reward,
+            "time_to_collision_reward": ttc_reward,
+            "high_speed_reward": speed_reward
+        }
+
+    def _rewards_version_3(self, action: Action) -> dict[str, float]:
         """Compute reward components based on the traffic context w/2-flows approach."""
         # Compute TTC
         ttc, front_vehicle, distance = self._front_vehicle_info()
