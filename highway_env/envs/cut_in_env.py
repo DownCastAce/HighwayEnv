@@ -172,9 +172,6 @@ class CutInEnv(AbstractEnv):
         }
 
     def _rewards_version_2(self, action: Action) -> dict[str, float]:
-        # Calculate forward speed
-        forward_speed = self.vehicle.speed * np.cos(self.vehicle.heading)
-
         # Calculate acceleration reward
         scaled_acceleration = utils.lmap(
             self.vehicle.action["acceleration"],
@@ -190,6 +187,9 @@ class CutInEnv(AbstractEnv):
         # Calculate TTC reward
         ttc = self._time_to_collision()
         ttc_reward = self.ttc_reward_function(ttc)
+
+        # Calculate forward speed
+        forward_speed = self.vehicle.speed * np.cos(self.vehicle.heading)
 
         # Calculate speed reward
         max_speed = self.config["ego_lane_max_speed"]
